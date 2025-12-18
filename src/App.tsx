@@ -1,298 +1,52 @@
-import { useState, useMemo } from 'react'
-import { Building2, TrendingUp, Calculator, Info, ChevronDown, ChevronUp, AlertTriangle, Clock, HelpCircle } from 'lucide-react'
+import { useState, useMemo, useEffect } from 'react'
+import { Building2, TrendingUp, Calculator, Info, ChevronDown, ChevronUp, AlertTriangle, Clock, RotateCcw } from 'lucide-react'
 
-type ResidencyStatus = 'citizen' | 'pr' | 'foreigner'
-type PropertyNumber = 1 | 2 | 3
-type PropertyType = 'private' | 'hdb'
+import type { PropertyInputs } from './types'
+import {
+  calculateBSD,
+  calculateABSD,
+  getABSDRate,
+  calculateLegalFees,
+  calculateSSD,
+  calculatePropertyTax,
+  calculateMonthlyPayment,
+  calculateTDSR,
+  calculateCpfAccruedInterest,
+  calculateRentalIncomeTax,
+  estimateMonthlyRental,
+  estimateCurrentRent,
+  calculateMaxAffordablePrice,
+} from './utils/calculations'
+import { formatCurrency, formatPercent } from './utils/format'
+import { DEFAULT_INPUTS, TAX_BRACKETS } from './utils/constants'
+import { decodeStateFromUrl, updateUrlWithState } from './utils/url-state'
+import { Tooltip, Toggle } from './components/ui'
+import { ShareButton } from './components/ShareButton'
 
-interface PropertyInputs {
-  price: number
-  residencyStatus: ResidencyStatus
-  propertyType: PropertyType
-  propertyNumber: PropertyNumber
-  expectedRentalYield: number
-  holdingPeriodYears: number
-  annualAppreciation: number
-  loanPercentage: number
-  loanInterestRate: number
-  loanTenureYears: number
-  monthlyIncome: number
-  monthlyCondoFees: number
-  isRentingOut: boolean
-  // Financial position
-  cashAvailable: number
-  cpfOaBalance: number
-  useCpfForDownpayment: boolean
-  useCpfForMonthly: boolean
-  existingMonthlyDebt: number
-  marginalTaxRate: number // For rental income tax calculation
-  // New fields from spreadsheet
-  currentMonthlyRent: number // Rent you'd pay if not buying (saved expense)
-  expectedMonthlyRental: number // Expected rental income if renting out
-  rentOutRoom: boolean // Rent out a room while staying in
-  roomRentalIncome: number // Monthly room rental income
-  annualWorkIncome: number // For income tax calculation
-  agentFeePercent: number // Agent commission when selling (typically 2%)
-  prevailingInterestRate: number // For PV/FV calculations
-  // Additional realistic costs
-  loanLockInYears: number // Bank loan lock-in period (typically 2-3 years)
-  includeRenovation: boolean // Include renovation costs
-  renovationCost: number // One-time renovation cost
-  vacancyWeeksPerYear: number // Expected vacancy if renting out
-}
 
-// BSD rates (Feb 2023 onwards - from IRAS)
-// First $180k: 1%, Next $180k: 2%, Next $640k: 3%, Next $500k: 4%, Next $1.5M: 5%, Above $3M: 6%
-function calculateBSD(price: number): number {
-  let bsd = 0
-  if (price > 0) bsd += Math.min(price, 180000) * 0.01
-  if (price > 180000) bsd += Math.min(price - 180000, 180000) * 0.02
-  if (price > 360000) bsd += Math.min(price - 360000, 640000) * 0.03
-  if (price > 1000000) bsd += Math.min(price - 1000000, 500000) * 0.04
-  if (price > 1500000) bsd += Math.min(price - 1500000, 1500000) * 0.05
-  if (price > 3000000) bsd += (price - 3000000) * 0.06
-  return bsd
-}
-
-// ABSD rates (April 2023 onwards - verified from IRAS/PropertyGuru)
-function calculateABSD(price: number, status: ResidencyStatus, propertyNumber: PropertyNumber): number {
-  let rate = 0
-  if (status === 'citizen') {
-    if (propertyNumber === 1) rate = 0
-    else if (propertyNumber === 2) rate = 0.20
-    else rate = 0.30 // 3rd and subsequent
-  } else if (status === 'pr') {
-    if (propertyNumber === 1) rate = 0.05
-    else if (propertyNumber === 2) rate = 0.30
-    else rate = 0.35 // 3rd and subsequent
-  } else {
-    rate = 0.60 // Foreigners - any property
+function getInitialInputs(): PropertyInputs {
+  if (typeof window !== 'undefined') {
+    const searchParams = new URLSearchParams(window.location.search)
+    if (searchParams.toString()) {
+      return decodeStateFromUrl(searchParams, DEFAULT_INPUTS)
+    }
   }
-  return price * rate
+  return DEFAULT_INPUTS
 }
-
-// Get ABSD rate for display
-function getABSDRate(status: ResidencyStatus, propertyNumber: PropertyNumber): number {
-  if (status === 'citizen') {
-    if (propertyNumber === 1) return 0
-    else if (propertyNumber === 2) return 20
-    else return 30
-  } else if (status === 'pr') {
-    if (propertyNumber === 1) return 5
-    else if (propertyNumber === 2) return 30
-    else return 35
-  } else {
-    return 60
-  }
-}
-
-// Legal/conveyancing fees estimate (based on market research)
-function calculateLegalFees(price: number): number {
-  if (price <= 1000000) return 2500
-  if (price <= 2000000) return 3000
-  if (price <= 3000000) return 3500
-  return 5000
-}
-
-// SSD rates (if selling within 3 years of purchase)
-function calculateSSD(price: number, yearsHeld: number): number {
-  if (yearsHeld >= 3) return 0
-  if (yearsHeld < 1) return price * 0.12
-  if (yearsHeld < 2) return price * 0.08
-  return price * 0.04
-}
-
-// Property tax calculation based on Annual Value (IRAS 2024 rates)
-// For non-owner occupied (rental): Progressive 12% to 36%
-// For owner-occupied: Progressive 0% to 32%
-function calculatePropertyTax(annualRent: number, isOwnerOccupied: boolean): number {
-  const av = annualRent // Annual Value ≈ annual rent
-  
-  if (isOwnerOccupied) {
-    // Owner-occupier rates (2024)
-    let tax = 0
-    if (av > 0) tax += Math.min(av, 8000) * 0
-    if (av > 8000) tax += Math.min(av - 8000, 22000) * 0.04
-    if (av > 30000) tax += Math.min(av - 30000, 10000) * 0.06
-    if (av > 40000) tax += Math.min(av - 40000, 15000) * 0.10
-    if (av > 55000) tax += Math.min(av - 55000, 15000) * 0.14
-    if (av > 70000) tax += Math.min(av - 70000, 15000) * 0.20
-    if (av > 85000) tax += Math.min(av - 85000, 15000) * 0.26
-    if (av > 100000) tax += (av - 100000) * 0.32
-    return tax
-  } else {
-    // Non-owner-occupier rates (2024)
-    let tax = 0
-    if (av > 0) tax += Math.min(av, 30000) * 0.12
-    if (av > 30000) tax += Math.min(av - 30000, 15000) * 0.20
-    if (av > 45000) tax += Math.min(av - 45000, 15000) * 0.28
-    if (av > 60000) tax += (av - 60000) * 0.36
-    return tax
-  }
-}
-
-// Agent commission (typically 2% for seller)
-// function calculateAgentCommission(salePrice: number): number {
-//   return salePrice * 0.02
-// }
-
-// Monthly loan payment (PMT formula)
-function calculateMonthlyPayment(principal: number, annualRate: number, years: number): number {
-  if (principal === 0) return 0
-  if (annualRate === 0) return principal / (years * 12)
-  const monthlyRate = annualRate / 100 / 12
-  const numPayments = years * 12
-  return principal * (monthlyRate * Math.pow(1 + monthlyRate, numPayments)) / (Math.pow(1 + monthlyRate, numPayments) - 1)
-}
-
-// TDSR check (Total Debt Servicing Ratio - max 55% of gross monthly income)
-function calculateTDSR(monthlyPayment: number, existingDebt: number, monthlyIncome: number): number {
-  if (monthlyIncome === 0) return 0
-  return ((monthlyPayment + existingDebt) / monthlyIncome) * 100
-}
-
-// CPF accrued interest calculation (2.5% p.a. compounding)
-function calculateCpfAccruedInterest(cpfUsed: number, years: number): number {
-  if (cpfUsed === 0 || years === 0) return 0
-  // Compound interest: A = P(1 + r)^t - P
-  return cpfUsed * (Math.pow(1.025, years) - 1)
-}
-
-// Rental income tax calculation (Singapore progressive rates with 15% deemed expenses)
-function calculateRentalIncomeTax(grossRent: number, mortgageInterest: number, marginalTaxRate: number): number {
-  // Option 1: 15% deemed expenses + mortgage interest deduction
-  const deemedExpenses = grossRent * 0.15
-  const taxableIncome = Math.max(0, grossRent - deemedExpenses - mortgageInterest)
-  return taxableIncome * (marginalTaxRate / 100)
-}
-
-// Estimate monthly rental based on property price (Singapore market data 2024)
-// Based on gross yields: 1-bedder ~4%, 2-bedder ~3.5%, 3-bedder ~3%
-// Average ~3.2% for condos
-function estimateMonthlyRental(price: number): number {
-  const avgYield = 0.032 // 3.2% average gross yield
-  return Math.round((price * avgYield) / 12 / 100) * 100 // Round to nearest 100
-}
-
-// Estimate current rent based on property price (what you'd pay to rent similar)
-function estimateCurrentRent(price: number): number {
-  // Slightly higher than rental yield since landlord wants profit
-  const rentMultiplier = 0.035 // ~3.5%
-  return Math.round((price * rentMultiplier) / 12 / 100) * 100
-}
-
-// Calculate maximum affordable property price based on financial position
-function calculateMaxAffordablePrice(
-  cashAvailable: number,
-  cpfOaBalance: number,
-  monthlyIncome: number,
-  existingDebt: number,
-  loanPercentage: number,
-  interestRate: number,
-  loanTenure: number
-): number {
-  // Constraint 1: Cash + CPF for downpayment (5% must be cash, rest can be CPF)
-  const downpaymentPercent = (100 - loanPercentage) / 100
-  const maxFromCashCpf = (cashAvailable + cpfOaBalance * 0.95) / (downpaymentPercent + 0.05) // +5% for stamp duty estimate
-  
-  // Constraint 2: TDSR (55% of income for all debts)
-  const maxMonthlyPayment = monthlyIncome * 0.55 - existingDebt
-  if (maxMonthlyPayment <= 0) return 0
-  
-  // Reverse PMT formula to get max loan
-  const monthlyRate = interestRate / 100 / 12
-  const numPayments = loanTenure * 12
-  const maxLoan = monthlyRate > 0
-    ? maxMonthlyPayment * (1 - Math.pow(1 + monthlyRate, -numPayments)) / monthlyRate
-    : maxMonthlyPayment * numPayments
-  const maxFromTDSR = maxLoan / (loanPercentage / 100)
-  
-  // Return the lower of the two constraints, rounded down to nearest 50k
-  return Math.floor(Math.min(maxFromCashCpf, maxFromTDSR) / 50000) * 50000
-}
-
-function formatCurrency(value: number): string {
-  return new Intl.NumberFormat('en-SG', { style: 'currency', currency: 'SGD', maximumFractionDigits: 0 }).format(value)
-}
-
-function formatPercent(value: number): string {
-  return `${value.toFixed(2)}%`
-}
-
-// === REUSABLE UI COMPONENTS ===
-
-function Tooltip({ text }: { text: string }) {
-  return (
-    <div className="group relative inline-block ml-1">
-      <HelpCircle className="w-4 h-4 text-slate-500 cursor-help inline" />
-      <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-3 py-2 bg-slate-700 text-xs text-white rounded-lg opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none w-48 z-10">
-        {text}
-        <div className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-slate-700"></div>
-      </div>
-    </div>
-  )
-}
-
-function Toggle({ enabled, onChange, color = 'emerald', size = 'md' }: { 
-  enabled: boolean; 
-  onChange: () => void; 
-  color?: 'emerald' | 'cyan' | 'amber' | 'purple';
-  size?: 'sm' | 'md';
-}) {
-  const colorClasses = { emerald: 'bg-emerald-500', cyan: 'bg-cyan-500', amber: 'bg-amber-500', purple: 'bg-purple-500' }
-  const sizeClasses = size === 'sm' 
-    ? { track: 'w-12 h-6', thumb: 'w-4 h-4', on: 'translate-x-6', off: 'translate-x-1' }
-    : { track: 'w-14 h-7', thumb: 'w-5 h-5', on: 'translate-x-7', off: 'translate-x-1' }
-  
-  return (
-    <button
-      onClick={onChange}
-      className={`relative ${sizeClasses.track} rounded-full transition-all ${enabled ? colorClasses[color] : 'bg-slate-600'}`}
-    >
-      <div className={`absolute top-1 ${sizeClasses.thumb} rounded-full bg-white shadow-md transition-all duration-200 ${enabled ? sizeClasses.on : sizeClasses.off}`} />
-    </button>
-  )
-}
-
-// === CONSTANTS ===
-const DEFAULT_PRICE = 1500000
 
 function App() {
-  const [inputs, setInputs] = useState<PropertyInputs>({
-    price: DEFAULT_PRICE,
-    residencyStatus: 'pr',
-    propertyType: 'private',
-    propertyNumber: 1,
-    expectedRentalYield: 3.2,
-    holdingPeriodYears: 5,
-    annualAppreciation: 3.0,
-    loanPercentage: 75,
-    loanInterestRate: 2.6,
-    loanTenureYears: 30,
-    monthlyIncome: 15000,
-    monthlyCondoFees: 300,
-    isRentingOut: false,
-    cashAvailable: 500000,
-    cpfOaBalance: 150000,
-    useCpfForDownpayment: true,
-    useCpfForMonthly: false,
-    existingMonthlyDebt: 0,
-    marginalTaxRate: 15,
-    currentMonthlyRent: estimateCurrentRent(DEFAULT_PRICE),
-    expectedMonthlyRental: estimateMonthlyRental(DEFAULT_PRICE),
-    rentOutRoom: false,
-    roomRentalIncome: 1500,
-    annualWorkIncome: 185000,
-    agentFeePercent: 2,
-    prevailingInterestRate: 2.8,
-    // Additional realistic costs
-    loanLockInYears: 2, // Typical bank lock-in period
-    includeRenovation: false, // Toggle for renovation costs
-    renovationCost: 50000, // Default renovation estimate
-    vacancyWeeksPerYear: 4, // ~1 month vacancy per year if renting
-  })
-
+  const [inputs, setInputs] = useState<PropertyInputs>(getInitialInputs)
   const [showAdvanced, setShowAdvanced] = useState(false)
+
+  // Sync state to URL when inputs change
+  useEffect(() => {
+    updateUrlWithState(inputs)
+  }, [inputs])
+
+  const handleReset = () => {
+    setInputs(DEFAULT_INPUTS)
+    window.history.replaceState(null, '', window.location.pathname)
+  }
   
   // Auto-update rental estimates when price changes
   const handlePriceChange = (newPrice: number) => {
@@ -644,14 +398,27 @@ function App() {
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white">
       <div className="max-w-7xl mx-auto px-4 py-6">
         {/* Header */}
-        <div className="text-center mb-8">
-          <div className="flex items-center justify-center gap-3 mb-2">
-            <Building2 className="w-8 h-8 text-emerald-400" />
-            <h1 className="text-3xl font-bold bg-gradient-to-r from-emerald-400 to-cyan-400 bg-clip-text text-transparent">
-              SG Property Calculator
-            </h1>
+        <div className="mb-8">
+          <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center gap-3">
+              <Building2 className="w-8 h-8 text-emerald-400" />
+              <h1 className="text-3xl font-bold bg-gradient-to-r from-emerald-400 to-cyan-400 bg-clip-text text-transparent">
+                SG Property Calculator
+              </h1>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={handleReset}
+                className="flex items-center gap-2 px-3 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-300 transition-all text-sm"
+                title="Reset to defaults"
+              >
+                <RotateCcw className="w-4 h-4" />
+                <span className="hidden sm:inline">Reset</span>
+              </button>
+              <ShareButton inputs={inputs} />
+            </div>
           </div>
-          <p className="text-slate-400">Calculate the true cost of buying property in Singapore</p>
+          <p className="text-slate-400 text-center">Calculate the true cost of buying property in Singapore</p>
         </div>
 
         {/* Quick Stats Bar */}
@@ -1090,19 +857,9 @@ function App() {
                     onChange={e => updateInput('marginalTaxRate', Number(e.target.value))}
                     className="w-full bg-slate-700/50 border border-slate-600 rounded-xl py-2.5 px-4 focus:outline-none focus:ring-2 focus:ring-green-500"
                   >
-                    <option value={0}>0% (≤$20k)</option>
-                    <option value={2}>2% ($20-30k)</option>
-                    <option value={3.5}>3.5% ($30-40k)</option>
-                    <option value={7}>7% ($40-80k)</option>
-                    <option value={11.5}>11.5% ($80-120k)</option>
-                    <option value={15}>15% ($120-160k)</option>
-                    <option value={18}>18% ($160-200k)</option>
-                    <option value={19}>19% ($200-240k)</option>
-                    <option value={19.5}>19.5% ($240-280k)</option>
-                    <option value={20}>20% ($280-320k)</option>
-                    <option value={22}>22% ($320-500k)</option>
-                    <option value={23}>23% ($500k-1M)</option>
-                    <option value={24}>24% (&gt;$1M)</option>
+                    {TAX_BRACKETS.map(bracket => (
+                      <option key={bracket.value} value={bracket.value}>{bracket.label}</option>
+                    ))}
                   </select>
                 </div>
 

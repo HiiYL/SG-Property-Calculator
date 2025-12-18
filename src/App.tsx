@@ -166,16 +166,6 @@ function calculateRentalIncomeTax(grossRent: number, mortgageInterest: number, m
   return taxableIncome * (marginalTaxRate / 100)
 }
 
-// Estimate marginal tax rate based on income (for future auto-calculation feature)
-// Singapore 2024 tax brackets
-const TAX_BRACKETS = [
-  { max: 20000, rate: 0 }, { max: 30000, rate: 2 }, { max: 40000, rate: 3.5 },
-  { max: 80000, rate: 7 }, { max: 120000, rate: 11.5 }, { max: 160000, rate: 15 },
-  { max: 200000, rate: 18 }, { max: 240000, rate: 19 }, { max: 280000, rate: 19.5 },
-  { max: 320000, rate: 20 }, { max: 500000, rate: 22 }, { max: 1000000, rate: 23 },
-  { max: Infinity, rate: 24 }
-]
-
 // Estimate monthly rental based on property price (Singapore market data 2024)
 // Based on gross yields: 1-bedder ~4%, 2-bedder ~3.5%, 3-bedder ~3%
 // Average ~3.2% for condos
